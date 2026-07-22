@@ -3,12 +3,12 @@
 // ※ Firebase Consoleで取得した設定情報に書き換えてください
 // ==========================================
 const firebaseConfig = {
-  apiKey: "YOUR_API_KEY",
-  authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
-  projectId: "YOUR_PROJECT_ID",
-  storageBucket: "YOUR_PROJECT_ID.appspot.com",
-  messagingSenderId: "YOUR_SENDER_ID",
-  appId: "YOUR_APP_ID"
+  apiKey: "AIzaSyCAbnmoilRTxVaAt1QyH62LMUPD9U_siJU",
+  authDomain: "it-passport-quiz-7f8d3.firebaseapp.com",
+  projectId: "it-passport-quiz-7f8d3",
+  storageBucket: "it-passport-quiz-7f8d3.firebasestorage.app",
+  messagingSenderId: "987503473765",
+  appId: "1:987503473765:web:f5c4c27992547cce0bc28c"
 };
 
 // Firebaseの初期化 (CDN compat版)
