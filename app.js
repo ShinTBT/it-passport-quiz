@@ -1,6 +1,5 @@
 // ==========================================
 // 1. Firebase 初期化設定
-// ※ Firebase Consoleで取得した設定情報に書き換えてください
 // ==========================================
 const firebaseConfig = {
   apiKey: "AIzaSyCAbnmoilRTxVaAt1QyH62LMUPD9U_siJU",
@@ -22,10 +21,42 @@ let timerInterval = null;
 let userName = "";
 const isAdmin = window.location.search.includes('mode=admin');
 
+// ==========================================
+// 2. ランダム抽出ロジック（比率維持）
+// ==========================================
+function selectRandomQuestions(allQuestions) {
+  // カテゴリごとに分類
+  const strategy = allQuestions.filter(q => q.category === 'ストラテジ系');
+  const management = allQuestions.filter(q => q.category === 'マネジメント系');
+  const technology = allQuestions.filter(q => q.category === 'テクノロジ系');
+
+  // 配列シャッフル用関数
+  const shuffle = (array) => [...array].sort(() => Math.random() - 0.5);
+
+  // 本番の比率（ストラテジ35問, マネジメント15問, テクノロジ50問）で抽出
+  // ※プール内の問題数が足りない場合は、存在する全数を出力します
+  const selectedStrategy = shuffle(strategy).slice(0, 35);
+  const selectedManagement = shuffle(management).slice(0, 15);
+  const selectedTechnology = shuffle(technology).slice(0, 50);
+
+  // 抽出した100問を合体させ、さらに順序をシャッフル
+  const selectedAll = [...selectedStrategy, ...selectedManagement, ...selectedTechnology];
+  return shuffle(selectedAll);
+}
+
 // 画面読み込み時の初期化
 window.onload = async () => {
-  const res = await fetch('questions.json');
-  questions = await res.json();
+  try {
+    const res = await fetch('questions.json');
+    if (!res.ok) throw new Error('questions.json の読み込みに失敗しました');
+    const allQuestions = await res.json();
+
+    // 100問以上のプールから比率通りに100問を自動抽出
+    questions = selectRandomQuestions(allQuestions);
+  } catch (e) {
+    console.error(e);
+    alert('【エラー】問題データの読み込みに失敗しました。');
+  }
 
   if (isAdmin) {
     document.getElementById('login-view').style.display = 'none';
@@ -41,6 +72,11 @@ window.onload = async () => {
 function startExam() {
   const nameInput = document.getElementById('student-name').value.trim();
   if (!nameInput) return alert('お名前を入力してください');
+  
+  if (!questions || questions.length === 0) {
+    return alert('問題データが正しく読み込まれていません。');
+  }
+
   userName = nameInput;
 
   document.getElementById('login-view').style.display = 'none';
@@ -68,7 +104,7 @@ function startTimer() {
 function showQuestion(index) {
   currentQIndex = index;
   const q = questions[index];
-  document.getElementById('q-number').innerText = `問題 ${index + 1} / ${questions.length}`;
+  document.getElementById('q-number').innerText = `問題 ${index + 1} / ${questions.length} [${q.category || ''}]`;
   document.getElementById('q-text').innerText = q.question;
 
   const container = document.getElementById('options-container');
@@ -123,7 +159,7 @@ function listenBroadcast() {
           const expBox = document.getElementById('student-explanation');
           expBox.innerHTML = `
             <div class="explanation-box">
-              <h3>【解説モード】問題 ${questions.indexOf(q) + 1}</h3>
+              <h3>【解説モード】問題 ${questions.indexOf(q) + 1} (${q.category})</h3>
               <p><strong>問題:</strong> ${q.question}</p>
               <p><strong>正解:</strong> ${['ア', 'イ', 'ウ', 'エ'][q.answer]}. ${q.options[q.answer]}</p>
               <p><strong>解説:</strong> ${q.explanation}</p>
@@ -173,7 +209,7 @@ function initAdminMonitor() {
 
       item.innerHTML = `
         <div>
-          <strong>問題 ${questions.indexOf(q) + 1}:</strong> ${q.question.substring(0, 35)}...
+          <strong>[${q.category}] 問題 ${questions.indexOf(q) + 1}:</strong> ${q.question.substring(0, 30)}...
         </div>
         <div>
           <span class="badge ${badgeClass}">正答率: ${q.rate}% (${q.correctCount}/${docs.length}人)</span>
