@@ -11,330 +11,185 @@ const firebaseConfig = {
   appId: "1:987503473765:web:f5c4c27992547cce0bc28c"
 };
 
-// Firebaseの初期化 (CDN compat版)
-if (!firebase.apps.length) {
-  firebase.initializeApp(firebaseConfig);
-}
+firebase.initializeApp(firebaseConfig);
 const db = firebase.firestore();
 
-// ==========================================
-// 2. グローバル変数 & 状態管理
-// ==========================================
-let questionsData = [];
-let currentUserRole = "student"; // 'student' or 'admin'
-let studentName = "";
-let selectedOptionIndex = null;
-let roomState = {};
-let resultChart = null;
+let questions = [];
+let currentQIndex = 0;
+let userAnswers = {}; // { q1: 0, q2: 2, ... }
+let timeLeft = 3600; // 60分 (3600秒)
+let timerInterval = null;
+let userName = "";
+const isAdmin = window.location.search.includes('mode=admin');
 
-// URLクエリパラメータでモード切り替え (?mode=admin で講師モード)
-const urlParams = new URLSearchParams(window.location.search);
-if (urlParams.get("mode") === "admin") {
-  currentUserRole = "admin";
-}
+// 画面読み込み時の初期化
+window.onload = async () => {
+  const res = await fetch('questions.json');
+  questions = await res.json();
 
-// ==========================================
-// 3. 初期化処理 (DOM読み込み時)
-// ==========================================
-document.addEventListener("DOMContentLoaded", async () => {
-  setupUI();
-  await loadQuestions();
-  initFirestoreListeners();
-  
-  if (currentUserRole === "admin") {
-    initChart();
-  }
-});
-
-function setupUI() {
-  const roleLabel = document.getElementById("user-role-label");
-  if (currentUserRole === "admin") {
-    roleLabel.textContent = "モード: 講師 (管理者画面)";
-    document.getElementById("admin-view").classList.remove("hidden");
+  if (isAdmin) {
+    document.getElementById('login-view').style.display = 'none';
+    document.getElementById('admin-view').style.display = 'block';
+    initAdminMonitor();
   } else {
-    roleLabel.textContent = "モード: 学生 (解答画面)";
-    document.getElementById("student-view").classList.remove("hidden");
+    listenBroadcast(); // 講師からの解説指示を待機
   }
+};
+
+// --- 学生用処理 ---
+
+function startExam() {
+  const nameInput = document.getElementById('student-name').value.trim();
+  if (!nameInput) return alert('お名前を入力してください');
+  userName = nameInput;
+
+  document.getElementById('login-view').style.display = 'none';
+  document.getElementById('exam-view').style.display = 'block';
+
+  showQuestion(0);
+  startTimer();
 }
 
-// ==========================================
-// 4. 問題データ (questions.json) の読み込み
-// ==========================================
-async function loadQuestions() {
-  try {
-    const response = await fetch("questions.json");
-    questionsData = await response.json();
-    
-    if (currentUserRole === "admin") {
-      const selectEl = document.getElementById("admin-question-select");
-      selectEl.innerHTML = "";
-      questionsData.forEach((q, index) => {
-        const opt = document.createElement("option");
-        opt.value = q.id;
-        opt.textContent = `[${q.category}] Q${index + 1}. ${q.question.substring(0, 30)}...`;
-        selectEl.appendChild(opt);
-      });
-      selectEl.addEventListener("change", updateAdminPreview);
-      updateAdminPreview();
+function startTimer() {
+  timerInterval = setInterval(() => {
+    timeLeft--;
+    const m = Math.floor(timeLeft / 60).toString().padStart(2, '0');
+    const s = (timeLeft % 60).toString().padStart(2, '0');
+    document.getElementById('timer').innerText = `残り時間: ${m}:${s}`;
+
+    if (timeLeft <= 0) {
+      clearInterval(timerInterval);
+      alert('制限時間（60分）が終了しました。回答を自動送信します。');
+      submitExam(true);
     }
-  } catch (error) {
-    console.error("問題データの読み込みに失敗しました:", error);
-  }
+  }, 1000);
 }
 
-// 講師画面でプレビュー更新
-function updateAdminPreview() {
-  const qId = document.getElementById("admin-question-select").value;
-  const q = questionsData.find(item => item.id === qId);
-  if (!q) return;
+function showQuestion(index) {
+  currentQIndex = index;
+  const q = questions[index];
+  document.getElementById('q-number').innerText = `問題 ${index + 1} / ${questions.length}`;
+  document.getElementById('q-text').innerText = q.question;
 
-  document.getElementById("admin-q-text").textContent = q.question;
-  const optionsDiv = document.getElementById("admin-options-preview");
-  optionsDiv.innerHTML = q.options.map((opt, i) => `<div>${['ア','イ','ウ','エ'][i]}: ${opt}</div>`).join("");
-  document.getElementById("admin-correct-answer").textContent = `正解: ${['ア','イ','ウ','エ'][q.answer]} (インデックス ${q.answer})`;
-  document.getElementById("admin-explanation-text").textContent = q.explanation;
-}
+  const container = document.getElementById('options-container');
+  container.innerHTML = '';
 
-// ==========================================
-// 5. Firestore リアルタイムリスナー
-// ==========================================
-function initFirestoreListeners() {
-  // 1. ルーム状態 (roomState/current) の監視
-  db.collection("roomState").doc("current").onSnapshot(doc => {
-    if (!doc.exists) return;
-    roomState = doc.data();
-    updateUIByRoomState(roomState);
-  });
-
-  // 2. 回答データ (answers) の監視 (リアルタイム集計)
-  db.collection("answers").onSnapshot(snapshot => {
-    const answers = [];
-    snapshot.forEach(doc => answers.push(doc.data()));
-    
-    // 現在出題中の問題に対する回答のみフィルタリング
-    const currentAnswers = answers.filter(a => a.questionId === roomState.currentQuestionId);
-    
-    if (currentUserRole === "admin") {
-      updateAdminStats(currentAnswers);
-    }
-  });
-}
-
-// ルーム状態の変化に応じて学生画面/講師画面の表示を制御
-function updateUIByRoomState(state) {
-  const badge = document.getElementById("status-badge");
-  
-  if (state.status === "waiting") {
-    badge.textContent = "待機中";
-    badge.style.backgroundColor = "#e0e7ff";
-    badge.style.color = "#2563eb";
-
-    if (currentUserRole === "student") {
-      if (studentName) {
-        showCard("student-waiting-card");
-      } else {
-        showCard("student-login-card");
-      }
-    }
-  } else if (state.status === "answering") {
-    badge.textContent = "回答受付中";
-    badge.style.backgroundColor = "#dcfce7";
-    badge.style.color = "#16a34a";
-
-    if (currentUserRole === "student" && studentName) {
-      renderStudentQuiz(state.currentQuestionId);
-      showCard("student-quiz-card");
-    }
-  } else if (state.status === "showing_result") {
-    badge.textContent = "集計・解説中";
-    badge.style.backgroundColor = "#fef3c7";
-    badge.style.color = "#d97706";
-
-    if (currentUserRole === "student" && studentName) {
-      renderStudentResult(state.currentQuestionId);
-      showCard("student-result-card");
-    }
-  }
-}
-
-function showCard(cardId) {
-  ["student-login-card", "student-waiting-card", "student-quiz-card", "student-result-card"].forEach(id => {
-    document.getElementById(id).classList.add("hidden");
-  });
-  document.getElementById(cardId).classList.remove("hidden");
-}
-
-// ==========================================
-// 6. 学生側のロジック (参加・解答送信)
-// ==========================================
-document.getElementById("join-btn").addEventListener("click", () => {
-  const input = document.getElementById("student-name-input").value.trim();
-  if (!input) {
-    alert("お名前を入力してください。");
-    return;
-  }
-  studentName = input;
-  updateUIByRoomState(roomState);
-});
-
-function renderStudentQuiz(questionId) {
-  const q = questionsData.find(item => item.id === questionId);
-  if (!q) return;
-
-  document.getElementById("student-q-category").textContent = q.category;
-  document.getElementById("student-q-text").textContent = q.question;
-  
-  const container = document.getElementById("student-options-container");
-  container.innerHTML = "";
-  selectedOptionIndex = null;
-  document.getElementById("submit-answer-btn").disabled = true;
-
-  const labels = ["ア", "イ", "ウ", "エ"];
-  q.options.forEach((optText, index) => {
-    const btn = document.createElement("button");
-    btn.className = "option-btn";
-    btn.innerHTML = `<strong>${labels[index]}.</strong> ${optText}`;
+  q.options.forEach((opt, idx) => {
+    const btn = document.createElement('button');
+    btn.className = `option-btn ${userAnswers[q.id] === idx ? 'selected' : ''}`;
+    btn.innerText = `${['ア', 'イ', 'ウ', 'エ'][idx]}. ${opt}`;
     btn.onclick = () => {
-      document.querySelectorAll(".option-btn").forEach(b => b.classList.remove("selected"));
-      btn.classList.add("selected");
-      selectedOptionIndex = index;
-      document.getElementById("submit-answer-btn").disabled = false;
+      userAnswers[q.id] = idx;
+      showQuestion(index); // 再描画して選択状態を反映
     };
     container.appendChild(btn);
   });
+
+  document.getElementById('prev-btn').disabled = (index === 0);
+  document.getElementById('next-btn').disabled = (index === questions.length - 1);
 }
 
-// 解答送信
-document.getElementById("submit-answer-btn").addEventListener("click", async () => {
-  if (selectedOptionIndex === null || !studentName) return;
-
-  const q = questionsData.find(item => item.id === roomState.currentQuestionId);
-  const isCorrect = (selectedOptionIndex === q.answer);
-
-  const answerDocId = `${studentName}_${q.id}`;
-  
-  try {
-    await db.collection("answers").doc(answerDocId).set({
-      studentName: studentName,
-      questionId: q.id,
-      selectedOption: selectedOptionIndex,
-      isCorrect: isCorrect,
-      timestamp: firebase.firestore.FieldValue.serverTimestamp()
-    });
-
-    document.getElementById("submit-answer-btn").disabled = true;
-    document.getElementById("submit-answer-btn").textContent = "解答送信済み（解説を待っています）";
-  } catch (error) {
-    console.error("解答の送信に失敗しました:", error);
-    alert("送信に失敗しました。もう一度お試しください。");
+function changeQuestion(dir) {
+  const newIndex = currentQIndex + dir;
+  if (newIndex >= 0 && newIndex < questions.length) {
+    showQuestion(newIndex);
   }
-});
-
-// 解説画面の表示 (学生側)
-function renderStudentResult(questionId) {
-  const q = questionsData.find(item => item.id === questionId);
-  if (!q) return;
-
-  const labels = ["ア", "イ", "ウ", "エ"];
-  const expBox = document.getElementById("student-explanation-box");
-  expBox.classList.remove("hidden");
-  
-  document.getElementById("student-correct-option").textContent = `正解: ${labels[q.answer]} (${q.options[q.answer]})`;
-  document.getElementById("student-explanation-text").textContent = q.explanation;
 }
 
-// ==========================================
-// 7. 講師側のロジック (操作 & 集計グラフ)
-// ==========================================
-document.getElementById("btn-start-quiz").addEventListener("click", async () => {
-  const selectedQId = document.getElementById("admin-question-select").value;
-  await db.collection("roomState").doc("current").set({
-    status: "answering",
-    currentQuestionId: selectedQId,
-    updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-  });
-});
+async function submitExam(isAuto) {
+  if (!isAuto && !confirm('回答を送信して試験を終了しますか？')) return;
+  clearInterval(timerInterval);
 
-document.getElementById("btn-show-result").addEventListener("click", async () => {
-  await db.collection("roomState").doc("current").update({
-    status: "showing_result",
-    updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+  // Firestoreへ回答を保存
+  await db.collection('submissions').doc(userName).set({
+    studentName: userName,
+    answers: userAnswers,
+    submittedAt: firebase.firestore.FieldValue.serverTimestamp()
   });
-});
 
-document.getElementById("btn-reset-quiz").addEventListener("click", async () => {
-  await db.collection("roomState").doc("current").update({
-    status: "waiting",
-    updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-  });
-});
+  document.getElementById('quiz-container').style.display = 'none';
+  document.getElementById('timer').style.display = 'none';
+  document.getElementById('result-view').style.display = 'block';
+}
 
-// Chart.js の初期化
-function initChart() {
-  const ctx = document.getElementById("resultChart").getContext("2d");
-  resultChart = new Chart(ctx, {
-    type: "bar",
-    data: {
-      labels: ["ア", "イ", "ウ", "エ"],
-      datasets: [{
-        label: "回答者数",
-        data: [0, 0, 0, 0],
-        backgroundColor: [
-          "rgba(54, 162, 235, 0.6)",
-          "rgba(255, 99, 132, 0.6)",
-          "rgba(255, 206, 86, 0.6)",
-          "rgba(75, 192, 192, 0.6)"
-        ],
-        borderColor: [
-          "rgba(54, 162, 235, 1)",
-          "rgba(255, 99, 132, 1)",
-          "rgba(255, 206, 86, 1)",
-          "rgba(75, 192, 192, 1)"
-        ],
-        borderWidth: 1
-      }]
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      scales: {
-        y: {
-          beginAtZero: true,
-          ticks: { stepSize: 1 }
+// 講師からの解説一斉切替をリアルタイム受信
+function listenBroadcast() {
+  db.collection('control').doc('currentView').onSnapshot(doc => {
+    if (doc.exists) {
+      const data = doc.data();
+      if (data && data.activeQId) {
+        const q = questions.find(item => item.id === data.activeQId);
+        if (q) {
+          const expBox = document.getElementById('student-explanation');
+          expBox.innerHTML = `
+            <div class="explanation-box">
+              <h3>【解説モード】問題 ${questions.indexOf(q) + 1}</h3>
+              <p><strong>問題:</strong> ${q.question}</p>
+              <p><strong>正解:</strong> ${['ア', 'イ', 'ウ', 'エ'][q.answer]}. ${q.options[q.answer]}</p>
+              <p><strong>解説:</strong> ${q.explanation}</p>
+            </div>
+          `;
         }
       }
     }
   });
 }
 
-// リアルタイム集計データの更新
-function updateAdminStats(answers) {
-  const total = answers.length;
-  document.getElementById("admin-answer-count").textContent = total;
+// --- 講師用処理 (低正答率集計 & 指示) ---
 
-  if (total === 0) {
-    document.getElementById("admin-correct-rate").textContent = "0%";
-    if (resultChart) {
-      resultChart.data.datasets[0].data = [0, 0, 0, 0];
-      resultChart.update();
-    }
-    return;
-  }
+function initAdminMonitor() {
+  db.collection('submissions').onSnapshot(snapshot => {
+    const docs = snapshot.docs.map(doc => doc.data());
+    document.getElementById('submitted-count').innerText = docs.length;
 
-  const correctCount = answers.filter(a => a.isCorrect).length;
-  const rate = Math.round((correctCount / total) * 100);
-  document.getElementById("admin-correct-rate").textContent = `${rate}%`;
+    if (docs.length === 0) return;
 
-  // 選択肢ごとの集計 [ア, イ, ウ, エ]
-  const counts = [0, 0, 0, 0];
-  answers.forEach(a => {
-    if (a.selectedOption >= 0 && a.selectedOption <= 3) {
-      counts[a.selectedOption]++;
-    }
+    // 問題ごとの正解数を集計
+    const stats = questions.map(q => {
+      let correctCount = 0;
+      docs.forEach(doc => {
+        if (doc.answers && doc.answers[q.id] === q.answer) {
+          correctCount++;
+        }
+      });
+      const rate = Math.round((correctCount / docs.length) * 100);
+      return { ...q, rate, correctCount };
+    });
+
+    // 正答率の低順（昇順）に並び替え
+    stats.sort((a, b) => a.rate - b.rate);
+
+    // ランキング描画
+    const listContainer = document.getElementById('ranking-list');
+    listContainer.innerHTML = '';
+
+    stats.forEach(q => {
+      const item = document.createElement('div');
+      item.className = 'question-list-item';
+      
+      let badgeClass = 'badge-danger';
+      if (q.rate >= 70) badgeClass = 'badge-success';
+      else if (q.rate >= 40) badgeClass = 'badge-warning';
+
+      item.innerHTML = `
+        <div>
+          <strong>問題 ${questions.indexOf(q) + 1}:</strong> ${q.question.substring(0, 35)}...
+        </div>
+        <div>
+          <span class="badge ${badgeClass}">正答率: ${q.rate}% (${q.correctCount}/${docs.length}人)</span>
+        </div>
+      `;
+      // クリックしたら全学生にその解説を表示させる命令を発行
+      item.onclick = () => broadcastExplanation(q.id);
+      listContainer.appendChild(item);
+    });
   });
+}
 
-  if (resultChart) {
-    resultChart.data.datasets[0].data = counts;
-    resultChart.update();
-  }
+async function broadcastExplanation(qId) {
+  await db.collection('control').doc('currentView').set({
+    activeQId: qId,
+    updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+  });
+  alert('全学生の画面を解説モードに切り替えました。');
 }
