@@ -48,7 +48,7 @@ window.onload = async () => {
     if (!res.ok) throw new Error('questions.json の読み込みに失敗しました');
     const allQuestions = await res.json();
     
-    // ★修正ポイント1: JSON側に id が存在しない場合でも確実にマッチするように自動補完
+    // JSON側に id が存在しない場合でも自動補完
     const formattedQuestions = allQuestions.map((q, idx) => ({
       id: q.id !== undefined ? String(q.id) : `q_${idx + 1}`,
       ...q
@@ -72,7 +72,6 @@ window.onload = async () => {
 
 // --- 学生用処理 ---
 
-// 講師からの「回答受付ステータス」をリアルタイム監視
 function listenExamStatus() {
   db.collection('control').doc('status').onSnapshot(doc => {
     if (doc.exists) {
@@ -86,7 +85,6 @@ function listenExamStatus() {
         if (startBtn) startBtn.disabled = true;
         if (statusMsg) statusMsg.innerText = "現在、教員により回答受付が停止されています。";
 
-        // 試験中の場合は自動送信して終了
         if (document.getElementById('exam-view').style.display === 'block') {
           alert('教員により回答受付が打ち切られました。現在の状態のまま回答を自動送信します。');
           submitExam(true);
@@ -116,14 +114,12 @@ function startExam() {
   document.getElementById('login-view').style.display = 'none';
   document.getElementById('exam-view').style.display = 'block';
 
-  // 教員からの強制ログアウト要求を監視開始
   listenForForceLogout(userName);
 
   showQuestion(0);
   startTimer();
 }
 
-// 講師からの強制ログアウト監視
 function listenForForceLogout(name) {
   if (logoutUnsubscribe) logoutUnsubscribe();
 
@@ -136,7 +132,6 @@ function listenForForceLogout(name) {
   });
 }
 
-// 学生側ログアウト処理（手動・自動兼用）
 function studentLogout(isManual = true) {
   if (isManual && !confirm('ログアウトして初期画面に戻りますか？（進行中の回答は破棄されます）')) {
     return;
@@ -224,13 +219,11 @@ async function submitExam(isAuto) {
   document.getElementById('result-view').style.display = 'block';
 }
 
-// 講師からの解説一斉切替をリアルタイム受信
 function listenBroadcast() {
   db.collection('control').doc('currentView').onSnapshot(doc => {
     if (doc.exists) {
       const data = doc.data();
       if (data && data.activeQId) {
-        // 問題IDが一致するものを検索（文字列として比較）
         const q = questions.find(item => String(item.id) === String(data.activeQId));
         if (q) {
           const expBox = document.getElementById('student-explanation');
@@ -245,15 +238,12 @@ function listenBroadcast() {
             `;
           }
 
-          // ★修正ポイント2: 画面切り替えの確実な実行
-          // 解答中・回答送信後どの状態でも解説表示枠が見える状態にする
           const examView = document.getElementById('exam-view');
           const resultView = document.getElementById('result-view');
           
           if (examView) examView.style.display = 'block';
           if (resultView) resultView.style.display = 'block';
 
-          // 解説を画面上部にスムーズスクロール表示させる
           expBox.scrollIntoView({ behavior: 'smooth' });
         }
       }
@@ -264,7 +254,6 @@ function listenBroadcast() {
 // --- 講師用処理 (モニタリング・受付切り替え・強制ログアウト) ---
 
 function initAdminMonitor() {
-  // 受付ステータスボタンの初期表示制御
   db.collection('control').doc('status').onSnapshot(doc => {
     const statusBtn = document.getElementById('toggle-accept-btn');
     if (statusBtn) {
@@ -278,7 +267,6 @@ function initAdminMonitor() {
     }
   });
 
-  // 提出一覧・集計・学生一覧のリアルタイム更新
   db.collection('submissions').onSnapshot(snapshot => {
     const docs = snapshot.docs.map(doc => doc.data());
     document.getElementById('submitted-count').innerText = docs.length;
@@ -322,13 +310,13 @@ function initAdminMonitor() {
           <span class="badge ${badgeClass}">正答率: ${q.rate}% (${q.correctCount}/${docs.length}人)</span>
         </div>
       `;
+      // クリック時に解説一斉切替 ＋ 教員用別ウィンドウ表示を呼び出す
       item.onclick = () => broadcastExplanation(q.id);
       listContainer.appendChild(item);
     });
   });
 }
 
-// 教員画面に提出中の学生一覧を描画
 function renderStudentList(students) {
   const container = document.getElementById('student-manage-list');
   if (!container) return;
@@ -361,16 +349,12 @@ function renderStudentList(students) {
   container.appendChild(ul);
 }
 
-// 教員から特定の学生を強制ログアウト＆データ削除
 async function forceLogoutStudent(targetName) {
   if (!confirm(`学生「${targetName}」の提出データを削除し、ログアウトさせますか？`)) {
     return;
   }
 
-  // 1. 該当学生の提出データを削除
   await db.collection('submissions').doc(targetName).delete();
-
-  // 2. 強制ログアウト信号を送信
   await db.collection('logout_requests').doc(targetName).set({
     requestedAt: firebase.firestore.FieldValue.serverTimestamp()
   });
@@ -378,7 +362,6 @@ async function forceLogoutStudent(targetName) {
   alert(`「${targetName}」のデータを削除し、ログアウト処理を実行しました。`);
 }
 
-// 教員側での回答受付 / 停止切り替え処理
 async function toggleAcceptance() {
   const statusRef = db.collection('control').doc('status');
   const doc = await statusRef.get();
@@ -400,10 +383,69 @@ async function toggleAcceptance() {
   }
 }
 
+// ★修正点: 全学生への切替命令とともに、教員用サブウィンドウで問題解説を表示する関数
 async function broadcastExplanation(qId) {
+  // 1. 全学生への配信命令
   await db.collection('control').doc('currentView').set({
     activeQId: qId,
     updatedAt: firebase.firestore.FieldValue.serverTimestamp()
   });
-  alert('全学生の画面を解説モードに切り替えました。');
+
+  // 2. 教員側（自分）でポップアップ（別ウィンドウ）を開く
+  const q = questions.find(item => String(item.id) === String(qId));
+  if (q) {
+    openAdminPreviewWindow(q);
+  }
+}
+
+// ★追加: 教員用問題プレビュー（別ウィンドウ）を開く関数
+function openAdminPreviewWindow(q) {
+  const win = window.open('', 'QuestionPreview', 'width=700,height=600,scrollbars=yes');
+  if (!win) {
+    alert('ポップアップがブロックされました。ブラウザのポップアップブロックを解除してください。');
+    return;
+  }
+
+  const optionsHtml = q.options.map((opt, idx) => {
+    const isCorrect = idx === q.answer;
+    const style = isCorrect ? 'background: #d4edda; color: #155724; font-weight: bold; border: 1px solid #c3e6cb;' : 'background: #f8f9fa; border: 1px solid #ddd;';
+    return `<li style="padding: 10px; margin: 6px 0; border-radius: 4px; list-style: none; ${style}">
+      ${['ア', 'イ', 'ウ', 'エ'][idx]}. ${opt} ${isCorrect ? ' (★正解)' : ''}
+    </li>`;
+  }).join('');
+
+  win.document.write(`
+    <!DOCTYPE html>
+    <html lang="ja">
+    <head>
+      <meta charset="UTF-8">
+      <title>【教員用】問題・解説プレビュー</title>
+      <style>
+        body { font-family: sans-serif; padding: 20px; line-height: 1.6; color: #333; background: #fff; }
+        .header { background: #2c3e50; color: #fff; padding: 10px 15px; border-radius: 4px; font-weight: bold; }
+        .question-box { margin: 15px 0; font-size: 1.1rem; }
+        .options-list { padding: 0; }
+        .explanation-box { background: #e8f8f5; border-left: 4px solid #2ecc71; padding: 15px; margin-top: 20px; border-radius: 4px; }
+      </style>
+    </head>
+    <body>
+      <div class="header">【教員確認用】問題 [${q.category || ''}]</div>
+      <div class="question-box">
+        <strong>【問題】</strong><br>
+        ${q.question}
+      </div>
+      <ul class="options-list">
+        ${optionsHtml}
+      </ul>
+      <div class="explanation-box">
+        <h4 style="margin-top:0;">【正解と解説】</h4>
+        <p><strong>正解:</strong> ${['ア', 'イ', 'ウ', 'エ'][q.answer]}. ${q.options[q.answer]}</p>
+        <p><strong>解説:</strong><br>${q.explanation || '解説テキストはありません。'}</p>
+      </div>
+    </body>
+    </html>
+  `);
+
+  win.document.close();
+  win.focus(); // 開いたウィンドウを手前に表示
 }
