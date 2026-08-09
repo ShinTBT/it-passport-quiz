@@ -217,6 +217,104 @@ async function submitExam(isAuto) {
   document.getElementById('quiz-container').style.display = 'none';
   document.getElementById('timer').style.display = 'none';
   document.getElementById('result-view').style.display = 'block';
+
+  // ★回答送信後に学生個人用分析レポートを描画
+  renderStudentPersonalReport();
+}
+
+// ★追加: 学生本人が確認できる「個人用成績＆弱点分析レポート」の描画関数
+function renderStudentPersonalReport() {
+  const resultView = document.getElementById('result-view');
+  if (!resultView) return;
+
+  let reportBox = document.getElementById('personal-report-box');
+  if (!reportBox) {
+    reportBox = document.createElement('div');
+    reportBox.id = 'personal-report-box';
+    reportBox.style.cssText = 'text-align: left; background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 8px; padding: 20px; margin: 20px 0;';
+    
+    // 解説エリアの上部にレポートを差し込む
+    const expBox = document.getElementById('student-explanation');
+    resultView.insertBefore(reportBox, expBox);
+  }
+
+  // カテゴリ別集計
+  const stats = {
+    'ストラテジ系': { correct: 0, total: 0 },
+    'マネジメント系': { correct: 0, total: 0 },
+    'テクノロジ系': { correct: 0, total: 0 }
+  };
+
+  let totalCorrect = 0;
+  let totalAnswered = 0;
+
+  questions.forEach(q => {
+    if (userAnswers[q.id] !== undefined) {
+      totalAnswered++;
+      if (q.category && stats[q.category]) {
+        stats[q.category].total++;
+        if (userAnswers[q.id] === q.answer) {
+          stats[q.category].correct++;
+          totalCorrect++;
+        }
+      }
+    }
+  });
+
+  const overallScore = Math.round((totalCorrect / questions.length) * 1000); // 1000点満点換算
+  const isPassed = overallScore >= 600; // 合格ライン 600点目安
+
+  let categoryHtml = '';
+  let rates = [];
+
+  for (const cat in stats) {
+    const total = stats[cat].total;
+    const correct = stats[cat].correct;
+    const rate = total > 0 ? Math.round((correct / total) * 100) : 0;
+    rates.push({ category: cat, rate: rate, correct: correct, total: total });
+
+    const badgeColor = rate >= 70 ? '#2ecc71' : (rate >= 40 ? '#f39c12' : '#e74c3c');
+
+    categoryHtml += `
+      <div style="margin: 10px 0; padding: 10px; background: #fff; border-radius: 4px; border-left: 5px solid ${badgeColor}; display: flex; justify-content: space-between; align-items: center;">
+        <div>
+          <strong>${cat}</strong>
+          <div style="font-size: 0.85rem; color: #666;">正答数: ${correct} / ${total} 問</div>
+        </div>
+        <span style="font-weight: bold; font-size: 1.2rem; color: ${badgeColor};">${rate}%</span>
+      </div>
+    `;
+  }
+
+  rates.sort((a, b) => a.rate - b.rate);
+  const weakest = rates[0];
+
+  reportBox.innerHTML = `
+    <h3 style="margin-top:0; color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 8px;">📊 総合個人スコアレポート</h3>
+    <div style="display: flex; gap: 20px; align-items: center; background: #fff; padding: 15px; border-radius: 6px; margin-bottom: 15px;">
+      <div style="text-align: center; border-right: 1px solid #eee; padding-right: 20px;">
+        <span style="font-size: 0.85rem; color: #666;">推定評価点</span>
+        <div style="font-size: 2rem; font-weight: bold; color: #2c3e50;">${overallScore} <span style="font-size: 1rem;">/ 1000点</span></div>
+        <span class="badge ${isPassed ? 'badge-success' : 'badge-danger'}" style="padding: 4px 10px; font-size: 0.9rem;">
+          ${isPassed ? '合格目安達成' : '要復習'}
+        </span>
+      </div>
+      <div style="flex: 1;">
+        <p style="margin: 0; font-weight: bold;">【解答状況】</p>
+        <p style="margin: 5px 0 0 0; color: #555; font-size: 0.95rem;">
+          100問中 <strong>${totalCorrect}</strong> 問正解 （正答率 ${Math.round((totalCorrect/questions.length)*100)}%）
+        </p>
+        ${weakest ? `
+          <p style="margin: 8px 0 0 0; color: #e74c3c; font-weight: bold; font-size: 0.9rem; background: #fdf2e9; padding: 6px; border-radius: 4px;">
+            ⚠️ 弱点分野: ${weakest.category} (正答率 ${weakest.rate}%)
+          </p>
+        ` : ''}
+      </div>
+    </div>
+
+    <h4>分野別正答率</h4>
+    ${categoryHtml}
+  `;
 }
 
 function listenBroadcast() {
@@ -272,8 +370,6 @@ function initAdminMonitor() {
     document.getElementById('submitted-count').innerText = docs.length;
 
     renderStudentList(docs);
-    
-    // ★追加: 学生別の弱点分析レポートの描画を呼び出し
     renderCategoryReport(docs);
 
     if (docs.length === 0) {
@@ -351,9 +447,7 @@ function renderStudentList(students) {
   container.appendChild(ul);
 }
 
-// ★追加: 学生個人の分野別成績・弱点レポートを自動生成・表示する機能
 function renderCategoryReport(students) {
-  // コンテナを動的に作成して、学生一覧の下に挿入する
   let container = document.getElementById('category-report-container');
   if (!container) {
     container = document.createElement('div');
@@ -374,16 +468,14 @@ function renderCategoryReport(students) {
 
   students.forEach(s => {
     const stats = {};
-    // カテゴリごとの集計箱を初期化
     ['ストラテジ系', 'マネジメント系', 'テクノロジ系'].forEach(cat => {
       stats[cat] = { correct: 0, total: 0 };
     });
 
-    // 学生の解答ループ
     for (const [qId, ansIdx] of Object.entries(s.answers)) {
       const q = questions.find(item => String(item.id) === String(qId));
       if (q && q.category) {
-        if (!stats[q.category]) stats[q.category] = { correct: 0, total: 0 }; // 予期せぬカテゴリのフォールバック
+        if (!stats[q.category]) stats[q.category] = { correct: 0, total: 0 };
         stats[q.category].total++;
         if (ansIdx === q.answer) {
           stats[q.category].correct++;
@@ -391,7 +483,6 @@ function renderCategoryReport(students) {
       }
     }
 
-    // 正答率を計算
     let rates = [];
     for (const cat in stats) {
       if (stats[cat].total > 0) {
@@ -400,22 +491,19 @@ function renderCategoryReport(students) {
       }
     }
 
-    // 正答率が低い順に並べ替え（一番上が最も苦手な分野になる）
     rates.sort((a, b) => a.rate - b.rate);
 
-    // 学生ごとのHTMLカード作成
     let studentHtml = `<div style="margin-bottom: 15px; padding: 12px; border: 1px solid #ddd; border-radius: 6px; background: #fff;">
       <strong style="font-size: 1.1rem;">${s.studentName}</strong>`;
 
     if (rates.length > 0) {
-      const weakest = rates[0]; // 最も正答率が低い分野
+      const weakest = rates[0];
       studentHtml += `<p style="margin: 5px 0 10px 0; color: #e74c3c; font-weight: bold; font-size: 0.95rem;">
         ⚠️ 重点課題: ${weakest.category} (正答率 ${weakest.rate}%)
       </p>`;
       
       studentHtml += `<div style="display: flex; gap: 10px; flex-wrap: wrap; font-size: 0.85rem;">`;
       rates.forEach(r => {
-        // 正答率に応じて左側の線の色を変える
         const color = r.rate >= 70 ? '#2ecc71' : (r.rate >= 40 ? '#f39c12' : '#e74c3c');
         studentHtml += `<span style="background: #f8f9fa; padding: 6px 10px; border-radius: 4px; border-left: 4px solid ${color};">
           ${r.category}: <strong>${r.rate}%</strong> (${r.correct}/${r.total})
