@@ -151,6 +151,11 @@ function studentLogout(isManual = true) {
 
   document.getElementById('exam-view').style.display = 'none';
   document.getElementById('result-view').style.display = 'none';
+  
+  // 個人レポート表示を削除
+  const pReport = document.getElementById('personal-report-box');
+  if (pReport) pReport.remove();
+
   if (document.getElementById('student-explanation')) {
     document.getElementById('student-explanation').innerHTML = '';
   }
@@ -218,11 +223,11 @@ async function submitExam(isAuto) {
   document.getElementById('timer').style.display = 'none';
   document.getElementById('result-view').style.display = 'block';
 
-  // ★回答送信後に学生個人用分析レポートを描画
+  // 学生個人の結果・レポート描画
   renderStudentPersonalReport();
 }
 
-// ★追加: 学生本人が確認できる「個人用成績＆弱点分析レポート」の描画関数
+// 学生本人が確認できる「個人用成績＆弱点分析レポート」の動的生成
 function renderStudentPersonalReport() {
   const resultView = document.getElementById('result-view');
   if (!resultView) return;
@@ -233,12 +238,10 @@ function renderStudentPersonalReport() {
     reportBox.id = 'personal-report-box';
     reportBox.style.cssText = 'text-align: left; background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 8px; padding: 20px; margin: 20px 0;';
     
-    // 解説エリアの上部にレポートを差し込む
     const expBox = document.getElementById('student-explanation');
     resultView.insertBefore(reportBox, expBox);
   }
 
-  // カテゴリ別集計
   const stats = {
     'ストラテジ系': { correct: 0, total: 0 },
     'マネジメント系': { correct: 0, total: 0 },
@@ -246,11 +249,9 @@ function renderStudentPersonalReport() {
   };
 
   let totalCorrect = 0;
-  let totalAnswered = 0;
 
   questions.forEach(q => {
     if (userAnswers[q.id] !== undefined) {
-      totalAnswered++;
       if (q.category && stats[q.category]) {
         stats[q.category].total++;
         if (userAnswers[q.id] === q.answer) {
@@ -261,8 +262,8 @@ function renderStudentPersonalReport() {
     }
   });
 
-  const overallScore = Math.round((totalCorrect / questions.length) * 1000); // 1000点満点換算
-  const isPassed = overallScore >= 600; // 合格ライン 600点目安
+  const overallScore = Math.round((totalCorrect / questions.length) * 1000);
+  const isPassed = overallScore >= 600;
 
   let categoryHtml = '';
   let rates = [];
@@ -447,6 +448,7 @@ function renderStudentList(students) {
   container.appendChild(ul);
 }
 
+// 教員画面用: 全学生の分野別苦手レポートの描画
 function renderCategoryReport(students) {
   let container = document.getElementById('category-report-container');
   if (!container) {
@@ -553,6 +555,7 @@ async function toggleAcceptance() {
   }
 }
 
+// 解説の一斉送信 ＋ 教員用サブウィンドウ表示
 async function broadcastExplanation(qId) {
   await db.collection('control').doc('currentView').set({
     activeQId: qId,
@@ -565,6 +568,7 @@ async function broadcastExplanation(qId) {
   }
 }
 
+// 教員側サブウィンドウ（ポップアップ）表示
 function openAdminPreviewWindow(q) {
   const win = window.open('', 'QuestionPreview', 'width=700,height=600,scrollbars=yes');
   if (!win) {
