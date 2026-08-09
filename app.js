@@ -47,7 +47,14 @@ window.onload = async () => {
     const res = await fetch('questions.json');
     if (!res.ok) throw new Error('questions.json の読み込みに失敗しました');
     const allQuestions = await res.json();
-    questions = selectRandomQuestions(allQuestions);
+    
+    // ★修正ポイント1: JSON側に id が存在しない場合でも確実にマッチするように自動補完
+    const formattedQuestions = allQuestions.map((q, idx) => ({
+      id: q.id !== undefined ? String(q.id) : `q_${idx + 1}`,
+      ...q
+    }));
+
+    questions = selectRandomQuestions(formattedQuestions);
   } catch (e) {
     console.error(e);
     alert('【エラー】問題データの読み込みに失敗しました。');
@@ -212,30 +219,42 @@ async function submitExam(isAuto) {
     submittedAt: firebase.firestore.FieldValue.serverTimestamp()
   });
 
-  document.getElementById('exam-view').style.display = 'none';
-  if (document.getElementById('quiz-container')) {
-    document.getElementById('quiz-container').style.display = 'none';
-  }
+  document.getElementById('quiz-container').style.display = 'none';
   document.getElementById('timer').style.display = 'none';
   document.getElementById('result-view').style.display = 'block';
 }
 
+// 講師からの解説一斉切替をリアルタイム受信
 function listenBroadcast() {
   db.collection('control').doc('currentView').onSnapshot(doc => {
     if (doc.exists) {
       const data = doc.data();
       if (data && data.activeQId) {
-        const q = questions.find(item => item.id === data.activeQId);
+        // 問題IDが一致するものを検索（文字列として比較）
+        const q = questions.find(item => String(item.id) === String(data.activeQId));
         if (q) {
           const expBox = document.getElementById('student-explanation');
-          expBox.innerHTML = `
-            <div class="explanation-box">
-              <h3>【解説モード】問題 ${questions.indexOf(q) + 1} (${q.category})</h3>
-              <p><strong>問題:</strong> ${q.question}</p>
-              <p><strong>正解:</strong> ${['ア', 'イ', 'ウ', 'エ'][q.answer]}. ${q.options[q.answer]}</p>
-              <p><strong>解説:</strong> ${q.explanation}</p>
-            </div>
-          `;
+          if (expBox) {
+            expBox.innerHTML = `
+              <div class="explanation-box">
+                <h3>【解説モード】問題 ${questions.indexOf(q) + 1} (${q.category || ''})</h3>
+                <p><strong>問題:</strong> ${q.question}</p>
+                <p><strong>正解:</strong> ${['ア', 'イ', 'ウ', 'エ'][q.answer]}. ${q.options[q.answer]}</p>
+                <p><strong>解説:</strong> ${q.explanation || '解説はありません。'}</p>
+              </div>
+            `;
+          }
+
+          // ★修正ポイント2: 画面切り替えの確実な実行
+          // 解答中・回答送信後どの状態でも解説表示枠が見える状態にする
+          const examView = document.getElementById('exam-view');
+          const resultView = document.getElementById('result-view');
+          
+          if (examView) examView.style.display = 'block';
+          if (resultView) resultView.style.display = 'block';
+
+          // 解説を画面上部にスムーズスクロール表示させる
+          expBox.scrollIntoView({ behavior: 'smooth' });
         }
       }
     }
