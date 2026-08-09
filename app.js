@@ -66,7 +66,7 @@ window.onload = async () => {
     initAdminMonitor();
   } else {
     listenBroadcast();
-    listenExamStatus(); // 回答受付状態のリアルタイム監視
+    listenExamStatus();
   }
 };
 
@@ -251,7 +251,7 @@ function listenBroadcast() {
   });
 }
 
-// --- 講師用処理 (モニタリング・受付切り替え・強制ログアウト) ---
+// --- 講師用処理 (モニタリング・受付切り替え・強制ログアウト・弱点分析) ---
 
 function initAdminMonitor() {
   db.collection('control').doc('status').onSnapshot(doc => {
@@ -272,6 +272,9 @@ function initAdminMonitor() {
     document.getElementById('submitted-count').innerText = docs.length;
 
     renderStudentList(docs);
+    
+    // ★追加: 学生別の弱点分析レポートの描画を呼び出し
+    renderCategoryReport(docs);
 
     if (docs.length === 0) {
       document.getElementById('ranking-list').innerHTML = '';
@@ -310,7 +313,6 @@ function initAdminMonitor() {
           <span class="badge ${badgeClass}">正答率: ${q.rate}% (${q.correctCount}/${docs.length}人)</span>
         </div>
       `;
-      // クリック時に解説一斉切替 ＋ 教員用別ウィンドウ表示を呼び出す
       item.onclick = () => broadcastExplanation(q.id);
       listContainer.appendChild(item);
     });
@@ -321,7 +323,7 @@ function renderStudentList(students) {
   const container = document.getElementById('student-manage-list');
   if (!container) return;
 
-  container.innerHTML = '<h3>参加・提出済学生一覧（管理操作）</h3>';
+  container.innerHTML = '<h3 style="margin-top:0;">参加・提出済学生一覧（管理操作）</h3>';
 
   if (students.length === 0) {
     container.innerHTML += '<p style="color: #666;">現在データはありません。</p>';
@@ -347,6 +349,86 @@ function renderStudentList(students) {
   });
 
   container.appendChild(ul);
+}
+
+// ★追加: 学生個人の分野別成績・弱点レポートを自動生成・表示する機能
+function renderCategoryReport(students) {
+  // コンテナを動的に作成して、学生一覧の下に挿入する
+  let container = document.getElementById('category-report-container');
+  if (!container) {
+    container = document.createElement('div');
+    container.id = 'category-report-container';
+    container.className = 'admin-card';
+    const studentManageList = document.getElementById('student-manage-list');
+    if (studentManageList) {
+      studentManageList.parentNode.insertBefore(container, studentManageList.nextSibling);
+    }
+  }
+
+  container.innerHTML = '<h3 style="margin-top:0;">学生別 弱点分析レポート (分野別正答率)</h3>';
+
+  if (students.length === 0) {
+    container.innerHTML += '<p style="color: #666;">提出データがありません。</p>';
+    return;
+  }
+
+  students.forEach(s => {
+    const stats = {};
+    // カテゴリごとの集計箱を初期化
+    ['ストラテジ系', 'マネジメント系', 'テクノロジ系'].forEach(cat => {
+      stats[cat] = { correct: 0, total: 0 };
+    });
+
+    // 学生の解答ループ
+    for (const [qId, ansIdx] of Object.entries(s.answers)) {
+      const q = questions.find(item => String(item.id) === String(qId));
+      if (q && q.category) {
+        if (!stats[q.category]) stats[q.category] = { correct: 0, total: 0 }; // 予期せぬカテゴリのフォールバック
+        stats[q.category].total++;
+        if (ansIdx === q.answer) {
+          stats[q.category].correct++;
+        }
+      }
+    }
+
+    // 正答率を計算
+    let rates = [];
+    for (const cat in stats) {
+      if (stats[cat].total > 0) {
+        const rate = Math.round((stats[cat].correct / stats[cat].total) * 100);
+        rates.push({ category: cat, rate: rate, correct: stats[cat].correct, total: stats[cat].total });
+      }
+    }
+
+    // 正答率が低い順に並べ替え（一番上が最も苦手な分野になる）
+    rates.sort((a, b) => a.rate - b.rate);
+
+    // 学生ごとのHTMLカード作成
+    let studentHtml = `<div style="margin-bottom: 15px; padding: 12px; border: 1px solid #ddd; border-radius: 6px; background: #fff;">
+      <strong style="font-size: 1.1rem;">${s.studentName}</strong>`;
+
+    if (rates.length > 0) {
+      const weakest = rates[0]; // 最も正答率が低い分野
+      studentHtml += `<p style="margin: 5px 0 10px 0; color: #e74c3c; font-weight: bold; font-size: 0.95rem;">
+        ⚠️ 重点課題: ${weakest.category} (正答率 ${weakest.rate}%)
+      </p>`;
+      
+      studentHtml += `<div style="display: flex; gap: 10px; flex-wrap: wrap; font-size: 0.85rem;">`;
+      rates.forEach(r => {
+        // 正答率に応じて左側の線の色を変える
+        const color = r.rate >= 70 ? '#2ecc71' : (r.rate >= 40 ? '#f39c12' : '#e74c3c');
+        studentHtml += `<span style="background: #f8f9fa; padding: 6px 10px; border-radius: 4px; border-left: 4px solid ${color};">
+          ${r.category}: <strong>${r.rate}%</strong> (${r.correct}/${r.total})
+        </span>`;
+      });
+      studentHtml += `</div>`;
+    } else {
+      studentHtml += `<p style="margin: 5px 0; color: #666; font-size: 0.9rem;">まだ回答データがありません</p>`;
+    }
+
+    studentHtml += `</div>`;
+    container.innerHTML += studentHtml;
+  });
 }
 
 async function forceLogoutStudent(targetName) {
@@ -383,22 +465,18 @@ async function toggleAcceptance() {
   }
 }
 
-// ★修正点: 全学生への切替命令とともに、教員用サブウィンドウで問題解説を表示する関数
 async function broadcastExplanation(qId) {
-  // 1. 全学生への配信命令
   await db.collection('control').doc('currentView').set({
     activeQId: qId,
     updatedAt: firebase.firestore.FieldValue.serverTimestamp()
   });
 
-  // 2. 教員側（自分）でポップアップ（別ウィンドウ）を開く
   const q = questions.find(item => String(item.id) === String(qId));
   if (q) {
     openAdminPreviewWindow(q);
   }
 }
 
-// ★追加: 教員用問題プレビュー（別ウィンドウ）を開く関数
 function openAdminPreviewWindow(q) {
   const win = window.open('', 'QuestionPreview', 'width=700,height=600,scrollbars=yes');
   if (!win) {
@@ -447,5 +525,5 @@ function openAdminPreviewWindow(q) {
   `);
 
   win.document.close();
-  win.focus(); // 開いたウィンドウを手前に表示
+  win.focus();
 }
