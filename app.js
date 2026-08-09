@@ -19,27 +19,24 @@ let userAnswers = {}; // { q1: 0, q2: 2, ... }
 let timeLeft = 3600; // 60分 (3600秒)
 let timerInterval = null;
 let userName = "";
+let isExamActive = true; // 現在の回答受付状態
+let logoutUnsubscribe = null; // 強制ログアウト監視用リスナー
 const isAdmin = window.location.search.includes('mode=admin');
 
 // ==========================================
 // 2. ランダム抽出ロジック（比率維持）
 // ==========================================
 function selectRandomQuestions(allQuestions) {
-  // カテゴリごとに分類
   const strategy = allQuestions.filter(q => q.category === 'ストラテジ系');
   const management = allQuestions.filter(q => q.category === 'マネジメント系');
   const technology = allQuestions.filter(q => q.category === 'テクノロジ系');
 
-  // 配列シャッフル用関数
   const shuffle = (array) => [...array].sort(() => Math.random() - 0.5);
 
-  // 本番の比率（ストラテジ35問, マネジメント15問, テクノロジ50問）で抽出
-  // ※プール内の問題数が足りない場合は、存在する全数を出力します
   const selectedStrategy = shuffle(strategy).slice(0, 35);
   const selectedManagement = shuffle(management).slice(0, 15);
   const selectedTechnology = shuffle(technology).slice(0, 50);
 
-  // 抽出した100問を合体させ、さらに順序をシャッフル
   const selectedAll = [...selectedStrategy, ...selectedManagement, ...selectedTechnology];
   return shuffle(selectedAll);
 }
@@ -50,8 +47,6 @@ window.onload = async () => {
     const res = await fetch('questions.json');
     if (!res.ok) throw new Error('questions.json の読み込みに失敗しました');
     const allQuestions = await res.json();
-
-    // 100問以上のプールから比率通りに100問を自動抽出
     questions = selectRandomQuestions(allQuestions);
   } catch (e) {
     console.error(e);
@@ -63,13 +58,45 @@ window.onload = async () => {
     document.getElementById('admin-view').style.display = 'block';
     initAdminMonitor();
   } else {
-    listenBroadcast(); // 講師からの解説指示を待機
+    listenBroadcast();
+    listenExamStatus(); // 回答受付状態のリアルタイム監視
   }
 };
 
 // --- 学生用処理 ---
 
+// 講師からの「回答受付ステータス」をリアルタイム監視
+function listenExamStatus() {
+  db.collection('control').doc('status').onSnapshot(doc => {
+    if (doc.exists) {
+      const data = doc.data();
+      isExamActive = data.isAccepting;
+
+      const startBtn = document.getElementById('start-btn');
+      const statusMsg = document.getElementById('status-message');
+
+      if (!isExamActive) {
+        if (startBtn) startBtn.disabled = true;
+        if (statusMsg) statusMsg.innerText = "現在、教員により回答受付が停止されています。";
+
+        // 試験中の場合は自動送信して終了
+        if (document.getElementById('exam-view').style.display === 'block') {
+          alert('教員により回答受付が打ち切られました。現在の状態のまま回答を自動送信します。');
+          submitExam(true);
+        }
+      } else {
+        if (startBtn) startBtn.disabled = false;
+        if (statusMsg) statusMsg.innerText = "";
+      }
+    }
+  });
+}
+
 function startExam() {
+  if (!isExamActive) {
+    return alert('現在、回答の受付は停止されています。');
+  }
+
   const nameInput = document.getElementById('student-name').value.trim();
   if (!nameInput) return alert('お名前を入力してください');
   
@@ -82,8 +109,51 @@ function startExam() {
   document.getElementById('login-view').style.display = 'none';
   document.getElementById('exam-view').style.display = 'block';
 
+  // 教員からの強制ログアウト要求を監視開始
+  listenForForceLogout(userName);
+
   showQuestion(0);
   startTimer();
+}
+
+// 講師からの強制ログアウト監視
+function listenForForceLogout(name) {
+  if (logoutUnsubscribe) logoutUnsubscribe();
+
+  logoutUnsubscribe = db.collection('logout_requests').doc(name).onSnapshot(doc => {
+    if (doc.exists) {
+      alert('教員によってログアウト（データの削除）が行われました。初期画面に戻ります。');
+      db.collection('logout_requests').doc(name).delete();
+      studentLogout(false);
+    }
+  });
+}
+
+// 学生側ログアウト処理（手動・自動兼用）
+function studentLogout(isManual = true) {
+  if (isManual && !confirm('ログアウトして初期画面に戻りますか？（進行中の回答は破棄されます）')) {
+    return;
+  }
+
+  if (timerInterval) clearInterval(timerInterval);
+
+  if (logoutUnsubscribe) {
+    logoutUnsubscribe();
+    logoutUnsubscribe = null;
+  }
+
+  userName = "";
+  userAnswers = {};
+  currentQIndex = 0;
+  timeLeft = 3600;
+
+  document.getElementById('exam-view').style.display = 'none';
+  document.getElementById('result-view').style.display = 'none';
+  if (document.getElementById('student-explanation')) {
+    document.getElementById('student-explanation').innerHTML = '';
+  }
+  document.getElementById('login-view').style.display = 'block';
+  document.getElementById('student-name').value = '';
 }
 
 function startTimer() {
@@ -116,7 +186,7 @@ function showQuestion(index) {
     btn.innerText = `${['ア', 'イ', 'ウ', 'エ'][idx]}. ${opt}`;
     btn.onclick = () => {
       userAnswers[q.id] = idx;
-      showQuestion(index); // 再描画して選択状態を反映
+      showQuestion(index);
     };
     container.appendChild(btn);
   });
@@ -136,19 +206,20 @@ async function submitExam(isAuto) {
   if (!isAuto && !confirm('回答を送信して試験を終了しますか？')) return;
   clearInterval(timerInterval);
 
-  // Firestoreへ回答を保存
   await db.collection('submissions').doc(userName).set({
     studentName: userName,
     answers: userAnswers,
     submittedAt: firebase.firestore.FieldValue.serverTimestamp()
   });
 
-  document.getElementById('quiz-container').style.display = 'none';
+  document.getElementById('exam-view').style.display = 'none';
+  if (document.getElementById('quiz-container')) {
+    document.getElementById('quiz-container').style.display = 'none';
+  }
   document.getElementById('timer').style.display = 'none';
   document.getElementById('result-view').style.display = 'block';
 }
 
-// 講師からの解説一斉切替をリアルタイム受信
 function listenBroadcast() {
   db.collection('control').doc('currentView').onSnapshot(doc => {
     if (doc.exists) {
@@ -171,16 +242,35 @@ function listenBroadcast() {
   });
 }
 
-// --- 講師用処理 (低正答率集計 & 指示) ---
+// --- 講師用処理 (モニタリング・受付切り替え・強制ログアウト) ---
 
 function initAdminMonitor() {
+  // 受付ステータスボタンの初期表示制御
+  db.collection('control').doc('status').onSnapshot(doc => {
+    const statusBtn = document.getElementById('toggle-accept-btn');
+    if (statusBtn) {
+      if (doc.exists && doc.data().isAccepting === false) {
+        statusBtn.innerText = "回答受付を再開する";
+        statusBtn.style.backgroundColor = "#28a745";
+      } else {
+        statusBtn.innerText = "回答受付を打ち切る（停止）";
+        statusBtn.style.backgroundColor = "#dc3545";
+      }
+    }
+  });
+
+  // 提出一覧・集計・学生一覧のリアルタイム更新
   db.collection('submissions').onSnapshot(snapshot => {
     const docs = snapshot.docs.map(doc => doc.data());
     document.getElementById('submitted-count').innerText = docs.length;
 
-    if (docs.length === 0) return;
+    renderStudentList(docs);
 
-    // 問題ごとの正解数を集計
+    if (docs.length === 0) {
+      document.getElementById('ranking-list').innerHTML = '';
+      return;
+    }
+
     const stats = questions.map(q => {
       let correctCount = 0;
       docs.forEach(doc => {
@@ -192,10 +282,8 @@ function initAdminMonitor() {
       return { ...q, rate, correctCount };
     });
 
-    // 正答率の低順（昇順）に並び替え
     stats.sort((a, b) => a.rate - b.rate);
 
-    // ランキング描画
     const listContainer = document.getElementById('ranking-list');
     listContainer.innerHTML = '';
 
@@ -215,11 +303,82 @@ function initAdminMonitor() {
           <span class="badge ${badgeClass}">正答率: ${q.rate}% (${q.correctCount}/${docs.length}人)</span>
         </div>
       `;
-      // クリックしたら全学生にその解説を表示させる命令を発行
       item.onclick = () => broadcastExplanation(q.id);
       listContainer.appendChild(item);
     });
   });
+}
+
+// 教員画面に提出中の学生一覧を描画
+function renderStudentList(students) {
+  const container = document.getElementById('student-manage-list');
+  if (!container) return;
+
+  container.innerHTML = '<h3>参加・提出済学生一覧（管理操作）</h3>';
+
+  if (students.length === 0) {
+    container.innerHTML += '<p style="color: #666;">現在データはありません。</p>';
+    return;
+  }
+
+  const ul = document.createElement('ul');
+  ul.style.listStyle = 'none';
+  ul.style.padding = '0';
+
+  students.forEach(s => {
+    const li = document.createElement('li');
+    li.style.cssText = 'display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid #ddd;';
+    li.innerHTML = `
+      <span><strong>${s.studentName}</strong></span>
+      <button style="background: #dc3545; color: white; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer;">
+        データ削除＆ログアウト
+      </button>
+    `;
+
+    li.querySelector('button').onclick = () => forceLogoutStudent(s.studentName);
+    ul.appendChild(li);
+  });
+
+  container.appendChild(ul);
+}
+
+// 教員から特定の学生を強制ログアウト＆データ削除
+async function forceLogoutStudent(targetName) {
+  if (!confirm(`学生「${targetName}」の提出データを削除し、ログアウトさせますか？`)) {
+    return;
+  }
+
+  // 1. 該当学生の提出データを削除
+  await db.collection('submissions').doc(targetName).delete();
+
+  // 2. 強制ログアウト信号を送信
+  await db.collection('logout_requests').doc(targetName).set({
+    requestedAt: firebase.firestore.FieldValue.serverTimestamp()
+  });
+
+  alert(`「${targetName}」のデータを削除し、ログアウト処理を実行しました。`);
+}
+
+// 教員側での回答受付 / 停止切り替え処理
+async function toggleAcceptance() {
+  const statusRef = db.collection('control').doc('status');
+  const doc = await statusRef.get();
+  
+  let currentStatus = true;
+  if (doc.exists && doc.data().isAccepting !== undefined) {
+    currentStatus = doc.data().isAccepting;
+  }
+
+  const newStatus = !currentStatus;
+  const actionText = newStatus ? "再開" : "停止（打ち切り）";
+
+  if (confirm(`回答の受付を【${actionText}】しますか？`)) {
+    await statusRef.set({
+      isAccepting: newStatus,
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+    });
+    alert(`回答受付を${actionText}しました。`);
+  }
 }
 
 async function broadcastExplanation(qId) {
